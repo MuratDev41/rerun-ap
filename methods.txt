@@ -1,0 +1,12 @@
+48: instance default void RestartLevel ()  (param: 11 impl_flags: cil managed )
+60: instance default void ReportToGameManager ()  (param: 11 impl_flags: cil managed )
+########## .FinishLevel
+########## .GameManager
+77: instance default void LevelDone ()  (param: 14 impl_flags: cil managed )
+########## .LevelSelect
+102: instance default void LoadLevel (int32 i)  (param: 16 impl_flags: cil managed )
+########## .PlayerStatus
+########## .GameState
+269: default void set_Instance (class GameState 'value')  (param: 59 impl_flags: cil managed )
+########## .PlayerSave
+477: instance default void NextLevel ()  (param: 120 impl_flags: cil managed )
