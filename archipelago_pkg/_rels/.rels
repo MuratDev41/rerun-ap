@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Type="http://schemas.microsoft.com/packaging/2010/07/manifest" Target="/Archipelago.MultiClient.Net.nuspec" Id="R156E13EAD87ACB85" />
-  <Relationship Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="/package/services/metadata/core-properties/5e0d4218cdaf45438cabedb5687409cb.psmdcp" Id="R17FF3A3DB67C0A76" />
-</Relationships>
