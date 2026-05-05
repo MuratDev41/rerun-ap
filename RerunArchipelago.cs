@@ -7,6 +7,7 @@ using Archipelago.MultiClient.Net.Enums;
 using Archipelago.MultiClient.Net.Helpers;
 using Archipelago.MultiClient.Net.Models;
 using UnityEngine;
+using Archipelago.MultiClient.Net.BounceFeatures.DeathLink;
 
 namespace RerunArchipelago
 {
@@ -17,6 +18,12 @@ namespace RerunArchipelago
         public ArchipelagoSession Session;
         public new BepInEx.Logging.ManualLogSource Logger;
 
+        // DeathLink
+        private DeathLinkService deathLinkService;
+        private int deathLinkAmnesty = 0;
+        private int deathCounter = 0;
+        private bool isReceivingDeath = false;
+
         // Settings for Archipelago connection
         private string serverUrl = "archipelago.gg:38281";
         private string slotName = "Player1";
@@ -24,7 +31,7 @@ namespace RerunArchipelago
 
         // UI State
         private bool showMenu = true;
-        private Rect windowRect = new Rect(20, 20, 320, 220);
+        private Rect windowRect = new Rect(20, 20, 320, 320);
 
         // Notifications
         private System.Collections.Generic.List<string> notifications = new System.Collections.Generic.List<string>();
@@ -44,8 +51,9 @@ namespace RerunArchipelago
             Logger = base.Logger;
             Logger.LogInfo("Plugin RE:RUN Archipelago is loaded!");
 
-            // Initialize unlocked levels (Menu only)
+            // Initialize unlocked levels (Menu and Level 0 always accessible)
             UnlockedLevels[0] = true; // Menu
+            UnlockedLevels[1] = true; // Level 0
 
             var harmony = new Harmony("com.archipelago.rerun.patches");
             harmony.PatchAll();
@@ -68,9 +76,27 @@ namespace RerunArchipelago
                     return;
                 }
 
+                var loginSuccess = (LoginSuccessful)result;
+                var slotData = loginSuccess.SlotData;
+
                 Logger.LogInfo("Successfully connected to Archipelago!");
                 AddNotification("Connected to Archipelago!");
                 showMenu = false;
+
+                // DeathLink Setup
+                if (slotData.TryGetValue("death_link", out var dl) && dl.ToString().ToLower() == "true")
+                {
+                    deathLinkService = Session.CreateDeathLinkService();
+                    deathLinkService.OnDeathLinkReceived += OnDeathLinkReceived;
+                    deathLinkService.EnableDeathLink();
+                    Logger.LogInfo("DeathLink enabled.");
+                }
+
+                if (slotData.TryGetValue("death_link_amnesty", out var am))
+                {
+                    int.TryParse(am.ToString(), out deathLinkAmnesty);
+                    Logger.LogInfo($"DeathLink Amnesty set to {deathLinkAmnesty}");
+                }
 
                 // Listen for received items
                 Session.Items.ItemReceived += OnItemReceived;
@@ -175,33 +201,63 @@ namespace RerunArchipelago
         {
             GUILayout.Space(8);
 
-            GUILayout.Label("Server URL:");
-            serverUrl = GUILayout.TextField(serverUrl);
+            if (Session == null)
+            {
+                GUILayout.Label("Server URL:");
+                serverUrl = GUILayout.TextField(serverUrl);
 
-            GUILayout.Label("Slot Name:");
-            slotName = GUILayout.TextField(slotName);
+                GUILayout.Label("Slot Name:");
+                slotName = GUILayout.TextField(slotName);
 
-            GUILayout.Label("Password:");
-            password = GUILayout.TextField(password);
+                GUILayout.Label("Password:");
+                password = GUILayout.TextField(password, GUILayout.Width(200));
+
+                GUILayout.Space(10);
+
+                if (GUILayout.Button("Connect"))
+                    Connect();
+                
+                GUILayout.Label("Status: ● Disconnected", GUILayout.ExpandWidth(true));
+            }
+            else
+            {
+                string status = _goalReached ? "★ GOAL REACHED ★" : $"● Connected as {slotName}";
+                GUILayout.Label(status, GUILayout.ExpandWidth(true));
+                
+                GUILayout.Space(10);
+                GUILayout.Label("<b>Powerups:</b>");
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"Sword: {(HasSword ? "<color=green>✓</color>" : "<color=red>✗</color>")}");
+                GUILayout.Label($"Jump: {(HasDoubleJump ? "<color=green>✓</color>" : "<color=red>✗</color>")}");
+                GUILayout.Label($"Rewind: {(HasRewind ? "<color=green>✓</color>" : "<color=red>✗</color>")}");
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(10);
+                GUILayout.Label("<b>Level Keys:</b>");
+                
+                // Draw levels in rows of 4
+                for (int row = 0; row < 3; row++)
+                {
+                    GUILayout.BeginHorizontal();
+                    for (int col = 0; col < 4; col++)
+                    {
+                        int i = row * 4 + col;
+                        if (i > 10) break;
+                        string color = UnlockedLevels[i + 1] ? "green" : "red";
+                        string mark = UnlockedLevels[i + 1] ? "✓" : "✗";
+                        GUILayout.Label($"L{i}: <color={color}>{mark}</color>", GUILayout.Width(60));
+                    }
+                    GUILayout.EndHorizontal();
+                }
+
+                GUILayout.Space(10);
+                int found = _sentLocations.Count;
+                GUILayout.Label($"Checks Found: {found} / 61"); // 11 levels + 5 powerups + 45 enemies
+            }
 
             GUILayout.Space(10);
-
-            if (GUILayout.Button("Connect"))
-                Connect();
-
-            string status = Session != null ? "● Connected" : "● Disconnected";
-            if (_goalReached) status = "★ GOAL REACHED ★";
-            GUILayout.Label(status);
-
-            GUILayout.Space(6);
-            GUILayout.Label($"Sword: {(HasSword ? "✓" : "✗")}  DoubleJump: {(HasDoubleJump ? "✓" : "✗")}  Rewind: {(HasRewind ? "✓" : "✗")}");
-            
-            string unlockedStr = "Levels: ";
-            for (int i = 0; i <= 10; i++)
-            {
-                if (UnlockedLevels[i + 1]) unlockedStr += $"{i} ";
-            }
-            GUILayout.Label(unlockedStr);
+            if (GUILayout.Button("Close Menu [P]"))
+                showMenu = false;
 
             GUI.DragWindow();
         }
@@ -267,6 +323,73 @@ namespace RerunArchipelago
                 
                 Logger.LogInfo("GOAL REACHED! All levels completed.");
                 AddNotification("★ GOAL REACHED! ★");
+            }
+        }
+
+        private void OnDeathLinkReceived(DeathLink deathLink)
+        {
+            try
+            {
+                Logger.LogInfo($"DeathLink received from {deathLink.Source}: {deathLink.Cause}");
+                isReceivingDeath = true;
+                
+                // Find player and kill them
+                var player = GameObject.FindObjectOfType<PlayerStatus>();
+                if (player != null)
+                {
+                    AccessTools.Method(typeof(PlayerStatus), "Kill").Invoke(player, null);
+                    AddNotification($"DeathLink: {deathLink.Source}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(ex, "OnDeathLinkReceived");
+            }
+            finally
+            {
+                isReceivingDeath = false;
+            }
+        }
+
+        public void SendDeathLink()
+        {
+            if (deathLinkService == null || isReceivingDeath) return;
+
+            deathCounter++;
+            if (deathCounter <= deathLinkAmnesty)
+            {
+                Logger.LogInfo($"DeathLink Amnesty: {deathCounter}/{deathLinkAmnesty}");
+                return;
+            }
+
+            deathCounter = 0;
+            try
+            {
+                var deathLink = new DeathLink(slotName, $"{slotName} ran out of time.");
+                deathLinkService.SendDeathLink(deathLink);
+                Logger.LogInfo("DeathLink sent.");
+            }
+            catch (Exception ex)
+            {
+                LogError(ex, "SendDeathLink");
+            }
+        }
+    }
+
+    // ─── DeathLink hook ──────────────────────────────────────────────────────
+    [HarmonyPatch(typeof(PlayerStatus), "Kill")]
+    public class PlayerStatus_Kill_Patch
+    {
+        static void Postfix()
+        {
+            try
+            {
+                if (ArchipelagoPlugin.Instance != null)
+                    ArchipelagoPlugin.Instance.SendDeathLink();
+            }
+            catch (Exception ex)
+            {
+                ArchipelagoPlugin.LogError(ex, "PlayerStatus.Kill Postfix");
             }
         }
     }
@@ -423,51 +546,51 @@ namespace RerunArchipelago
     public class Enemy_Death_Patches
     {
         private static System.Collections.Generic.Dictionary<(int, string), (long, string)> enemyLocations = new System.Collections.Generic.Dictionary<(int, string), (long, string)> {
-            { (0, "Enemy"), (3311000L, "The Poor Swordsman") },
-            { (1, "EnemyArcherBlue"), (3311001L, "Blue Double Jump Archer") },
-            { (2, "Enemy"), (3311002L, "The red swordman right at spawn") },
-            { (2, "BlueEnemy"), (3311003L, "The blue Double Jump Swordsman") },
-            { (3, "EnemyArcherBlue"), (3311004L, "The Blue Archer Across The Way") },
-            { (3, "Enemy"), (3311005L, "The Red Swordman before barricade") },
-            { (3, "Enemy (1)"), (3311006L, "The Red Swordman Right at the end") },
-            { (4, "Enemy"), (3311007L, "The Red Challanger 1") },
-            { (4, "Enemy (1)"), (3311008L, "The Red Challanger 2") },
-            { (4, "BlueEnemy"), (3311009L, "The Blue Challanger") },
-            { (4, "EnemyArcherBlue"), (3311010L, "The Blue Archer On Top") },
-            { (4, "EnemyArcher"), (3311011L, "The Red Archer On Top") },
-            { (5, "Enemy"), (3311012L, "The Red Enemy That Is Aproaching") },
-            { (5, "EnemyArcher"), (3311013L, "The Annoying Red Archer On The Back") },
-            { (5, "Enemy (2)"), (3311014L, "The Watcher Swordman 1") },
-            { (5, "Enemy (1)"), (3311015L, "The Watcher Swordman 2") },
-            { (5, "EnemyArcherBlue"), (3311016L, "The Blue King Archer") },
-            { (6, "BlueEnemy"), (3311017L, "The Giant Blue Swordman At Start") },
-            { (6, "EnemyArcher (2)"), (3311018L, "The Suprise Archer 1") },
-            { (6, "EnemyArcher (3)"), (3311019L, "The Suprise Archer 2") },
-            { (6, "EnemyArcher (1)"), (3311020L, "The Suprise Archer 3") },
-            { (6, "EnemyArcher"), (3311021L, "The Suprise Archer 4") },
-            { (7, "EnemyArcher"), (3311022L, "The Red Archer in front") },
-            { (7, "Enemy"), (3311023L, "The Red Archer on Top") },
-            { (7, "Enemy (1)"), (3311024L, "The Red Swordman in the Box 1") },
-            { (7, "Enemy (2)"), (3311025L, "The Red Swordman in the Box 2") },
-            { (7, "EnemyArcher (1)"), (3311026L, "The Red Archer at the End") },
-            { (7, "Enemy (3)"), (3311027L, "The Red Swordman at the End") },
-            { (8, "Enemy"), (3311028L, "The Red Swordman after sliding") },
-            { (8, "EnemyArcherBlue"), (3311029L, "The Blue Archer after that") },
-            { (8, "Enemy (1)"), (3311030L, "The Red Swordman after Double Jump") },
-            { (8, "Enemy (2)"), (3311031L, "The Red Swordman after The Red Swordman after Double Jump") },
-            { (8, "Enemy (3)"), (3311032L, "The Red Swordman after The Red Swordman after The Red Swordman after Double Jump") },
-            { (9, "Enemy"), (3311033L, "The Red Swordman at the start 1") },
-            { (9, "Enemy (1)"), (3311034L, "The Red Swordman at the start 2") },
-            { (9, "EnemyArcher"), (3311035L, "The Red Archer at the top") },
-            { (9, "EnemyArcher (1)"), (3311036L, "The Red Archer at the elevator") },
-            { (9, "BlueEnemy"), (3311037L, "The Blue Giant Swordman waiting for the elevator") },
-            { (9, "EnemyArcher (2)"), (3311038L, "The Red Archer that annoys me so much that i want to end him right there right now") },
-            { (10, "Enemy"), (3311039L, "The Red Swordman in the Room") },
-            { (10, "EnemyArcher"), (3311040L, "The Red Archer at the Castle 1") },
-            { (10, "EnemyArcher (1)"), (3311041L, "The Red Archer at the Castle 2") },
-            { (10, "EnemyArcherBlue"), (3311042L, "The Blue Archer at the Castle") },
-            { (10, "Enemy (1)"), (3311043L, "The Red Swordman at the end") },
-            { (10, "EnemyArcher (3)"), (3311044L, "The Red Archer at the end") },
+            { (0, "Enemy"), (3311000L, "Level 0 - The Poor Swordsman") },
+            { (1, "EnemyArcherBlue"), (3311001L, "Level 1 - Blue Double Jump Archer") },
+            { (2, "Enemy"), (3311002L, "Level 2 - The red swordman right at spawn") },
+            { (2, "BlueEnemy"), (3311003L, "Level 2 - The blue Double Jump Swordsman") },
+            { (3, "EnemyArcherBlue"), (3311004L, "Level 3 - The Blue Archer Across The Way") },
+            { (3, "Enemy"), (3311005L, "Level 3 - The Red Swordman before barricade") },
+            { (3, "Enemy (1)"), (3311006L, "Level 3 - The Red Swordman Right at the end") },
+            { (4, "Enemy"), (3311007L, "Level 4 - The Red Challanger 1") },
+            { (4, "Enemy (1)"), (3311008L, "Level 4 - The Red Challanger 2") },
+            { (4, "BlueEnemy"), (3311009L, "Level 4 - The Blue Challanger") },
+            { (4, "EnemyArcherBlue"), (3311010L, "Level 4 - The Blue Archer On Top") },
+            { (4, "EnemyArcher"), (3311011L, "Level 4 - The Red Archer On Top") },
+            { (5, "Enemy"), (3311012L, "Level 5 - The Red Enemy That Is Aproaching") },
+            { (5, "EnemyArcher"), (3311013L, "Level 5 - The Annoying Red Archer On The Back") },
+            { (5, "Enemy (2)"), (3311014L, "Level 5 - The Watcher Swordman 1") },
+            { (5, "Enemy (1)"), (3311015L, "Level 5 - The Watcher Swordman 2") },
+            { (5, "EnemyArcherBlue"), (3311016L, "Level 5 - The Blue King Archer") },
+            { (6, "BlueEnemy"), (3311017L, "Level 6 - The Giant Blue Swordman At Start") },
+            { (6, "EnemyArcher (2)"), (3311018L, "Level 6 - The Suprise Archer 1") },
+            { (6, "EnemyArcher (3)"), (3311019L, "Level 6 - The Suprise Archer 2") },
+            { (6, "EnemyArcher (1)"), (3311020L, "Level 6 - The Suprise Archer 3") },
+            { (6, "EnemyArcher"), (3311021L, "Level 6 - The Suprise Archer 4") },
+            { (7, "EnemyArcher"), (3311022L, "Level 7 - The Red Archer in front") },
+            { (7, "Enemy"), (3311023L, "Level 7 - The Red Swordman on Top") },
+            { (7, "Enemy (1)"), (3311024L, "Level 7 - The Red Swordman in the Box 1") },
+            { (7, "Enemy (2)"), (3311025L, "Level 7 - The Red Swordman in the Box 2") },
+            { (7, "EnemyArcher (1)"), (3311026L, "Level 7 - The Red Archer at the End") },
+            { (7, "Enemy (3)"), (3311027L, "Level 7 - The Red Swordman at the End") },
+            { (8, "Enemy"), (3311028L, "Level 8 - The Red Swordman after sliding") },
+            { (8, "EnemyArcherBlue"), (3311029L, "Level 8 - The Blue Archer after that") },
+            { (8, "Enemy (1)"), (3311030L, "Level 8 - The Red Swordman after Double Jump") },
+            { (8, "Enemy (2)"), (3311031L, "Level 8 - The Red Swordman after The Red Swordman after Double Jump") },
+            { (8, "Enemy (3)"), (3311032L, "Level 8 - The Red Swordman after The Red Swordman after The Red Swordman after Double Jump") },
+            { (9, "Enemy"), (3311033L, "Level 9 - The Red Swordman at the start 1") },
+            { (9, "Enemy (1)"), (3311034L, "Level 9 - The Red Swordman at the start 2") },
+            { (9, "EnemyArcher"), (3311035L, "Level 9 - The Red Archer at the top") },
+            { (9, "EnemyArcher (1)"), (3311036L, "Level 9 - The Red Archer at the elevator") },
+            { (9, "BlueEnemy"), (3311037L, "Level 9 - The Blue Giant Swordman waiting for the elevator") },
+            { (9, "EnemyArcher (2)"), (3311038L, "Level 9 - The Red Archer that annoys me so much that i want to end him right there right now") },
+            { (10, "Enemy"), (3311039L, "Level 10 - The Red Swordman in the Room") },
+            { (10, "EnemyArcher"), (3311040L, "Level 10 - The Red Archer at the Castle 1") },
+            { (10, "EnemyArcher (1)"), (3311041L, "Level 10 - The Red Archer at the Castle 2") },
+            { (10, "EnemyArcherBlue"), (3311042L, "Level 10 - The Blue Archer at the Castle") },
+            { (10, "Enemy (1)"), (3311043L, "Level 10 - The Red Swordman at the end") },
+            { (10, "EnemyArcher (3)"), (3311044L, "Level 10 - The Red Archer at the end") },
         };
 
         static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()

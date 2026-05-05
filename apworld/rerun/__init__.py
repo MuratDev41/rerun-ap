@@ -3,6 +3,7 @@ from worlds.AutoWorld import World, WebWorld
 
 from .items import item_table
 from .locations import location_table
+from .Options import rerun_options
 
 
 class RerunItem(Item):
@@ -32,6 +33,8 @@ class RerunWorld(World):
 	game = "RE:RUN"
 	web = RerunWebWorld()
 	topology_present = True
+	options_dataclass = None # Using dictionary for now
+	options = rerun_options
 
 	item_name_to_id = {
 		name: data.code
