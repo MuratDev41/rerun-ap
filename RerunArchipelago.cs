@@ -6,6 +6,7 @@ using Archipelago.MultiClient.Net;
 using Archipelago.MultiClient.Net.Enums;
 using Archipelago.MultiClient.Net.Helpers;
 using Archipelago.MultiClient.Net.Models;
+using Archipelago.MultiClient.Net.Packets;
 using UnityEngine;
 using Archipelago.MultiClient.Net.BounceFeatures.DeathLink;
 
@@ -33,9 +34,13 @@ namespace RerunArchipelago
         private bool showMenu = true;
         private Rect windowRect = new Rect(20, 20, 320, 320);
 
-        // Notifications
-        private System.Collections.Generic.List<string> notifications = new System.Collections.Generic.List<string>();
-        private float notificationTimer = 0f;
+        // Chat Log (Bottom-Left)
+        public struct ChatMessage
+        {
+            public string Text;
+            public float Timer;
+        }
+        private System.Collections.Generic.List<ChatMessage> chatLog = new System.Collections.Generic.List<ChatMessage>();
 
         // Powerup unlock flags (static so patches can read them)
         public static bool HasSword = false;
@@ -72,7 +77,7 @@ namespace RerunArchipelago
                     LoginFailure failure = (LoginFailure)result;
                     string err = string.Join(", ", failure.Errors);
                     Logger.LogError($"Failed to connect: {err}");
-                    AddNotification($"Connection failed: {err}");
+                    AddLog($"<color=red>Connection failed: {err}</color>");
                     return;
                 }
 
@@ -80,16 +85,71 @@ namespace RerunArchipelago
                 var slotData = loginSuccess.SlotData;
 
                 Logger.LogInfo("Successfully connected to Archipelago!");
-                AddNotification("Connected to Archipelago!");
+                Logger.LogInfo("--- Slot Data Received ---");
+                foreach (var kvp in slotData)
+                {
+                    Logger.LogInfo($"   {kvp.Key}: {kvp.Value}");
+                }
+                Logger.LogInfo("--------------------------");
+                AddLog("<color=green>Connected to Archipelago!</color>");
                 showMenu = false;
 
+                // Listen for server messages (chat/activity) using MessageLog for automatic ID resolution
+                Session.MessageLog.OnMessageReceived += (message) => {
+                    string fullText = "";
+                    foreach (var part in message.Parts)
+                    {
+                        string text = part.Text;
+                        string color = "white";
+
+                        if (part.Type == Archipelago.MultiClient.Net.MessageLog.Parts.MessagePartType.Player)
+                        {
+                            bool isMe = false;
+                            if (text == slotName || text == Session.Players.GetPlayerAlias(Session.ConnectionInfo.Slot))
+                                isMe = true;
+                            
+                            color = isMe ? "#ee00ee" : "#f4f4ce"; // Custom player colors
+                        }
+                        else if (part.Type == Archipelago.MultiClient.Net.MessageLog.Parts.MessagePartType.Item)
+                        {
+                            var itemPart = part as Archipelago.MultiClient.Net.MessageLog.Parts.ItemMessagePart;
+                            if (itemPart != null)
+                            {
+                                if ((itemPart.Flags & Archipelago.MultiClient.Net.Enums.ItemFlags.Advancement) != 0)
+                                    color = "#af99ef"; // Progressive
+                                else if ((itemPart.Flags & Archipelago.MultiClient.Net.Enums.ItemFlags.Trap) != 0)
+                                    color = "#fa7f72"; // Trap
+                                else if ((itemPart.Flags & Archipelago.MultiClient.Net.Enums.ItemFlags.NeverExclude) != 0)
+                                    color = "#6d8be8"; // Useful
+                                else
+                                    color = "#06eeee"; // Filler
+                            }
+                            else
+                            {
+                                color = "#06eeee"; // Filler fallback
+                            }
+                        }
+                        else if (part.Type == Archipelago.MultiClient.Net.MessageLog.Parts.MessagePartType.Location)
+                        {
+                            color = "#00FF00"; // Greenish
+                        }
+
+                        fullText += $"<color={color}>{text}</color>";
+                    }
+                    AddLog(fullText);
+                };
+
                 // DeathLink Setup
-                if (slotData.TryGetValue("death_link", out var dl) && dl.ToString().ToLower() == "true")
+                if (slotData.TryGetValue("death_link", out var dl))
                 {
-                    deathLinkService = Session.CreateDeathLinkService();
-                    deathLinkService.OnDeathLinkReceived += OnDeathLinkReceived;
-                    deathLinkService.EnableDeathLink();
-                    Logger.LogInfo("DeathLink enabled.");
+                    string dlStr = dl.ToString().ToLower();
+                    if (dlStr == "true" || dlStr == "1")
+                    {
+                        deathLinkService = Session.CreateDeathLinkService();
+                        deathLinkService.OnDeathLinkReceived += OnDeathLinkReceived;
+                        deathLinkService.EnableDeathLink();
+                        Logger.LogInfo("DeathLink enabled.");
+                    }
                 }
 
                 if (slotData.TryGetValue("death_link_amnesty", out var am))
@@ -111,7 +171,7 @@ namespace RerunArchipelago
             catch (Exception ex)
             {
                 Logger.LogError($"Exception during Archipelago connect: {ex.Message}");
-                AddNotification($"Error: {ex.Message}");
+                AddLog($"Error: {ex.Message}");
             }
         }
 
@@ -124,8 +184,6 @@ namespace RerunArchipelago
         private void ProcessItem(ItemInfo item)
         {
             Logger.LogInfo($"Received item: {item.ItemName} (ID: {item.ItemId})");
-            AddNotification($"Received: {item.ItemName}");
-
             long baseId = 3310000;
             long itemId = item.ItemId;
 
@@ -149,11 +207,12 @@ namespace RerunArchipelago
             }
         }
 
-        public void AddNotification(string message)
+
+
+        public void AddLog(string message)
         {
-            notifications.Add(message);
-            if (notifications.Count > 5) notifications.RemoveAt(0);
-            notificationTimer = 5f;
+            chatLog.Add(new ChatMessage { Text = message, Timer = 4f });
+            if (chatLog.Count > 6) chatLog.RemoveAt(0);
         }
 
         private void Update()
@@ -162,15 +221,15 @@ namespace RerunArchipelago
             if (Input.GetKeyDown(KeyCode.P))
                 showMenu = !showMenu;
 
-            // Notification timer
-            if (notifications.Count > 0)
+            // Log timer
+            for (int i = chatLog.Count - 1; i >= 0; i--)
             {
-                notificationTimer -= Time.deltaTime;
-                if (notificationTimer <= 0)
-                {
-                    notifications.RemoveAt(0);
-                    if (notifications.Count > 0) notificationTimer = 5f;
-                }
+                var msg = chatLog[i];
+                msg.Timer -= Time.deltaTime;
+                if (msg.Timer <= 0)
+                    chatLog.RemoveAt(i);
+                else
+                    chatLog[i] = msg; // Update back in list
             }
 
             if (showMenu)
@@ -182,15 +241,45 @@ namespace RerunArchipelago
 
         private void OnGUI()
         {
-            // Draw Notifications (top-right)
-            if (notifications.Count > 0)
+            // Draw Chat Logs (bottom-left)
+            if (chatLog.Count > 0)
             {
-                GUIStyle style = new GUIStyle(GUI.skin.box);
-                style.alignment = TextAnchor.UpperLeft;
-                style.fontSize = 18;
+                GUIStyle style = new GUIStyle();
+                style.alignment = TextAnchor.LowerLeft;
+                style.fontSize = 14; // 25% bigger than 11
+                style.richText = true;
                 style.normal.textColor = UnityEngine.Color.white;
-                string notifText = string.Join("\n", notifications);
-                GUI.Box(new Rect(Screen.width - 330, 20, 310, 28 * notifications.Count + 10), notifText, style);
+                
+                GUIStyle shadowStyle = new GUIStyle(style);
+                shadowStyle.normal.textColor = UnityEngine.Color.black;
+
+                float startY = Screen.height - 20;
+                float lineH = 19;
+
+                // Restore alpha after drawing logs
+                UnityEngine.Color oldColor = GUI.color;
+
+                for (int i = chatLog.Count - 1; i >= 0; i--)
+                {
+                    var msg = chatLog[i];
+                    float alpha = Mathf.Clamp01(msg.Timer / 1.0f); // Fade out in the last second
+                    if (msg.Timer > 1.0f) alpha = 1.0f;
+                    
+                    UnityEngine.Color c = GUI.color;
+                    c.a = alpha;
+                    GUI.color = c;
+
+                    Rect logRect = new Rect(20, startY - (chatLog.Count - i) * lineH, 800, lineH);
+                    
+                    // Draw shadow (strip rich text tags so it renders completely black)
+                    string cleanText = System.Text.RegularExpressions.Regex.Replace(msg.Text, "<.*?>", string.Empty);
+                    GUI.Label(new Rect(logRect.x + 1, logRect.y + 1, logRect.width, logRect.height), cleanText, shadowStyle);
+                    
+                    // Draw main text
+                    GUI.Label(logRect, msg.Text, style);
+                }
+
+                GUI.color = oldColor;
             }
 
             if (showMenu)
@@ -322,7 +411,7 @@ namespace RerunArchipelago
                 Session.Socket.SendPacket(statusPacket);
                 
                 Logger.LogInfo("GOAL REACHED! All levels completed.");
-                AddNotification("★ GOAL REACHED! ★");
+                AddLog("★ GOAL REACHED! ★");
             }
         }
 
@@ -338,7 +427,7 @@ namespace RerunArchipelago
                 if (player != null)
                 {
                     AccessTools.Method(typeof(PlayerStatus), "Kill").Invoke(player, null);
-                    AddNotification($"DeathLink: {deathLink.Source}");
+                    AddLog($"DeathLink: {deathLink.Source}");
                 }
             }
             catch (Exception ex)
@@ -465,7 +554,7 @@ namespace RerunArchipelago
                 if (!hasItem)
                 {
                     ArchipelagoPlugin.Instance.Logger.LogInfo($"{label} collected but NOT unlocked in Archipelago.");
-                    ArchipelagoPlugin.Instance.AddNotification($"{label} (Locked)");
+                    ArchipelagoPlugin.Instance.AddLog($"{label} (Locked)");
                     
                     // Still "consume" the pickup visually
                     if (__instance is MonoBehaviour mb)
@@ -522,7 +611,7 @@ namespace RerunArchipelago
                     if (!ArchipelagoPlugin.UnlockedLevels[requestedIndex])
                     {
                         ArchipelagoPlugin.Instance.Logger.LogInfo($"Level {requestedIndex - 1} is locked. Redirecting to Menu (Index 0).");
-                        ArchipelagoPlugin.Instance.AddNotification($"Level {requestedIndex - 1} is LOCKED");
+                        ArchipelagoPlugin.Instance.AddLog($"Level {requestedIndex - 1} is LOCKED");
                         
                         _isRedirecting = true;
                         __0 = 0; // Modify the first argument to 0 (Menu)

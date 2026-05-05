@@ -3,7 +3,7 @@ from worlds.AutoWorld import World, WebWorld
 
 from .items import item_table
 from .locations import location_table
-from .Options import rerun_options
+from .Options import rerun_options, RerunOptions
 
 
 class RerunItem(Item):
@@ -33,7 +33,7 @@ class RerunWorld(World):
 	game = "RE:RUN"
 	web = RerunWebWorld()
 	topology_present = True
-	options_dataclass = None # Using dictionary for now
+	options_dataclass = RerunOptions
 	options = rerun_options
 
 	item_name_to_id = {
@@ -108,3 +108,14 @@ class RerunWorld(World):
 
 	def get_filler_item_name(self) -> str:
 		return "Milk"
+
+	def fill_slot_data(self) -> dict:
+		slot_data = {
+			"death_link": self.options.death_link.value,
+			"death_link_amnesty": self.options.death_link_amnesty.value,
+		}
+		
+		import logging
+		logging.info(f"[RE:RUN] Generated slot data: {slot_data}")
+		
+		return slot_data
