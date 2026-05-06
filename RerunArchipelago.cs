@@ -57,12 +57,42 @@ namespace RerunArchipelago
             Logger = base.Logger;
             Logger.LogInfo("Plugin RE:RUN Archipelago is loaded!");
 
-            // Initialize unlocked levels (Menu and Level 0 always accessible)
+            // Initialize unlocked levels (Menu always accessible)
             UnlockedLevels[0] = true; // Menu
-            UnlockedLevels[1] = true; // Level 0
 
             var harmony = new Harmony("com.archipelago.rerun.patches");
+
+            // Patch non-death-link patches all at once (these are known-safe)
             harmony.PatchAll();
+
+            // Manually patch DeathLink hooks with fallback so missing methods don't crash the plugin
+            var postfix = new HarmonyMethod(typeof(DeathLinkHooks), nameof(DeathLinkHooks.SendDeathLinkPostfix));
+            foreach (var (typeName, methodName) in new[]
+            {
+                ("PlayerStatus",   "Kill"),
+                ("PlayerMovement", "Kill"),
+                ("PlayerMovement", "Die"),
+            })
+            {
+                try
+                {
+                    var type   = AccessTools.TypeByName(typeName);
+                    var method = type != null ? AccessTools.DeclaredMethod(type, methodName) : null;
+                    if (method != null)
+                    {
+                        harmony.Patch(method, postfix: postfix);
+                        Logger.LogInfo($"[DeathLink] Patched {typeName}.{methodName}");
+                    }
+                    else
+                    {
+                        Logger.LogWarning($"[DeathLink] Skipped {typeName}.{methodName} (not found)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning($"[DeathLink] Could not patch {typeName}.{methodName}: {ex.Message}");
+                }
+            }
         }
 
         private void Connect()
@@ -576,29 +606,10 @@ namespace RerunArchipelago
         }
     }
 
-    // ─── DeathLink hook ──────────────────────────────────────────────────────
-    [HarmonyPatch(typeof(PlayerStatus), "Kill")]
-    public class PlayerStatus_Kill_Patch
+    // ─── DeathLink hooks (applied manually in Awake to gracefully skip missing methods) ───
+    public static class DeathLinkHooks
     {
-        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
-    }
-
-    [HarmonyPatch(typeof(PlayerStatus), "Die")]
-    public class PlayerStatus_Die_Patch
-    {
-        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
-    }
-
-    [HarmonyPatch(typeof(PlayerMovement), "Kill")]
-    public class PlayerMovement_Kill_Patch
-    {
-        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
-    }
-
-    [HarmonyPatch(typeof(PlayerMovement), "Die")]
-    public class PlayerMovement_Die_Patch
-    {
-        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
+        public static void SendDeathLinkPostfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
     }
 
     // ─── Level completion hook ────────────────────────────────────────────────
