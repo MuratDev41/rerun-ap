@@ -24,6 +24,7 @@ namespace RerunArchipelago
         private int deathLinkAmnesty = 0;
         private int deathCounter = 0;
         private bool isReceivingDeath = false;
+        private float _lastDeathTime = 0f;
 
         // Settings for Archipelago connection
         private string serverUrl = "archipelago.gg:38281";
@@ -140,22 +141,35 @@ namespace RerunArchipelago
                 };
 
                 // DeathLink Setup
+                Logger.LogInfo("Initializing DeathLink...");
                 if (slotData.TryGetValue("death_link", out var dl))
                 {
                     string dlStr = dl.ToString().ToLower();
+                    Logger.LogInfo($"DeathLink slot data value: {dlStr}");
                     if (dlStr == "true" || dlStr == "1")
                     {
                         deathLinkService = Session.CreateDeathLinkService();
                         deathLinkService.OnDeathLinkReceived += OnDeathLinkReceived;
                         deathLinkService.EnableDeathLink();
-                        Logger.LogInfo("DeathLink enabled.");
+                        Logger.LogInfo("DeathLink service created and enabled.");
                     }
+                    else
+                    {
+                        Logger.LogInfo("DeathLink is disabled in slot data.");
+                    }
+                }
+                else
+                {
+                    Logger.LogInfo("DeathLink key not found in slot data.");
                 }
 
                 if (slotData.TryGetValue("death_link_amnesty", out var am))
                 {
-                    int.TryParse(am.ToString(), out deathLinkAmnesty);
-                    Logger.LogInfo($"DeathLink Amnesty set to {deathLinkAmnesty}");
+                    Logger.LogInfo($"DeathLink Amnesty raw value: {am}");
+                    if (int.TryParse(am.ToString(), out deathLinkAmnesty))
+                        Logger.LogInfo($"DeathLink Amnesty parsed as: {deathLinkAmnesty}");
+                    else
+                        Logger.LogWarning($"Failed to parse DeathLink Amnesty: {am}");
                 }
 
                 // Listen for received items
@@ -215,6 +229,8 @@ namespace RerunArchipelago
             if (chatLog.Count > 6) chatLog.RemoveAt(0);
         }
 
+        private float _tintTimer = 0f;
+
         private void Update()
         {
             // Toggle menu with P
@@ -236,6 +252,75 @@ namespace RerunArchipelago
             {
                 Cursor.lockState = CursorLockMode.None;
                 Cursor.visible = true;
+            }
+
+            // Tint level select buttons
+            if (Session != null && UnityEngine.SceneManagement.SceneManager.GetActiveScene().buildIndex == 0)
+            {
+                _tintTimer -= Time.deltaTime;
+                if (_tintTimer <= 0)
+                {
+                    _tintTimer = 1.0f; // Check every second
+
+                    var buttons = UnityEngine.Object.FindObjectsOfType<UnityEngine.UI.Button>();
+                    foreach (var btn in buttons)
+                    {
+                        int levelNum = -1;
+                        
+                        // Look for the level number in all text components (Standard and TMPro)
+                        // This avoids accidentally picking up the timer text
+                        var texts = btn.GetComponentsInChildren<UnityEngine.UI.Text>();
+                        foreach (var t in texts)
+                        {
+                            if (t.text.ToUpper().Contains("LEVEL"))
+                            {
+                                string numStr = System.Text.RegularExpressions.Regex.Match(t.text, @"\d+").Value;
+                                int.TryParse(numStr, out levelNum);
+                                break;
+                            }
+                        }
+
+                        if (levelNum == -1)
+                        {
+                            foreach (var comp in btn.GetComponentsInChildren<MonoBehaviour>())
+                            {
+                                if (comp.GetType().Name.Contains("TextMeshProUGUI"))
+                                {
+                                    var prop = Traverse.Create(comp).Property("text");
+                                    if (prop.PropertyExists())
+                                    {
+                                        string tText = prop.GetValue<string>();
+                                        if (tText != null && tText.ToUpper().Contains("LEVEL"))
+                                        {
+                                            string numStr = System.Text.RegularExpressions.Regex.Match(tText, @"\d+").Value;
+                                            int.TryParse(numStr, out levelNum);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (levelNum >= 0 && levelNum <= 10)
+                        {
+                            long locId = 3310000 + (levelNum + 1); // Level 0 is scene 1
+                            bool unlocked = UnlockedLevels[levelNum + 1];
+                            bool completed = Session.Locations.AllLocationsChecked.Contains(locId) || _sentLocations.Contains(locId);
+                            
+                            // Tint all images in the button hierarchy to ensure visibility
+                            var images = btn.GetComponentsInChildren<UnityEngine.UI.Image>();
+                            foreach (var img in images)
+                            {
+                                if (completed)
+                                    img.color = new UnityEngine.Color(0.5f, 1f, 0.5f, 1f); // Green for completed
+                                else if (!unlocked)
+                                    img.color = new UnityEngine.Color(0.3f, 0.3f, 0.3f, 1f); // Dark gray for locked
+                                else
+                                    img.color = UnityEngine.Color.white; // Normal for playable
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -341,7 +426,16 @@ namespace RerunArchipelago
 
                 GUILayout.Space(10);
                 int found = _sentLocations.Count;
-                GUILayout.Label($"Checks Found: {found} / 61"); // 11 levels + 5 powerups + 45 enemies
+                GUILayout.Label($"Checks Found: {found} / 72");
+
+                GUILayout.Space(10);
+                if (GUILayout.Button("Disconnect"))
+                {
+                    try { Session.Socket.DisconnectAsync(); } catch { }
+                    Session = null;
+                    Logger.LogInfo("Disconnected from Archipelago.");
+                    AddLog("<color=red>Disconnected from Archipelago.</color>");
+                }
             }
 
             GUILayout.Space(10);
@@ -419,7 +513,7 @@ namespace RerunArchipelago
         {
             try
             {
-                Logger.LogInfo($"DeathLink received from {deathLink.Source}: {deathLink.Cause}");
+                Logger.LogInfo($"[DeathLink] Received from {deathLink.Source} at {deathLink.Timestamp}. Cause: {deathLink.Cause}");
                 isReceivingDeath = true;
                 
                 // Find player and kill them
@@ -427,7 +521,7 @@ namespace RerunArchipelago
                 if (player != null)
                 {
                     AccessTools.Method(typeof(PlayerStatus), "Kill").Invoke(player, null);
-                    AddLog($"DeathLink: {deathLink.Source}");
+                    AddLog($"<color=red>DeathLink from {deathLink.Source}: {deathLink.Cause}</color>");
                 }
             }
             catch (Exception ex)
@@ -442,21 +536,38 @@ namespace RerunArchipelago
 
         public void SendDeathLink()
         {
-            if (deathLinkService == null || isReceivingDeath) return;
+            if (deathLinkService == null)
+            {
+                Logger.LogInfo("[DeathLink] Not sending: Service is null (DeathLink likely disabled).");
+                return;
+            }
+            if (isReceivingDeath)
+            {
+                Logger.LogInfo("[DeathLink] Not sending: Currently processing a received DeathLink.");
+                return;
+            }
+
+            // Prevent double-counting multiple calls for the same death (e.g. within 1 second)
+            if (Time.time - _lastDeathTime < 1.0f) return;
+            _lastDeathTime = Time.time;
 
             deathCounter++;
-            if (deathCounter <= deathLinkAmnesty)
+            // Send when counter hits amnesty (e.g. if amnesty is 5, send on 5th death)
+            if (deathCounter < deathLinkAmnesty)
             {
-                Logger.LogInfo($"DeathLink Amnesty: {deathCounter}/{deathLinkAmnesty}");
+                Logger.LogInfo($"[DeathLink] Amnesty: {deathCounter}/{deathLinkAmnesty}");
+                AddLog($"DeathLink Amnesty: {deathCounter}/{deathLinkAmnesty}");
                 return;
             }
 
             deathCounter = 0;
             try
             {
-                var deathLink = new DeathLink(slotName, $"{slotName} ran out of time.");
+                Logger.LogInfo($"[DeathLink] Sending death link from {slotName} (Amnesty reached)...");
+                var deathLink = new DeathLink(slotName, $"{slotName} had a skill issue.");
                 deathLinkService.SendDeathLink(deathLink);
-                Logger.LogInfo("DeathLink sent.");
+                Logger.LogInfo("[DeathLink] Successfully sent.");
+                AddLog("<color=red>DeathLink Sent!</color>");
             }
             catch (Exception ex)
             {
@@ -469,18 +580,25 @@ namespace RerunArchipelago
     [HarmonyPatch(typeof(PlayerStatus), "Kill")]
     public class PlayerStatus_Kill_Patch
     {
-        static void Postfix()
-        {
-            try
-            {
-                if (ArchipelagoPlugin.Instance != null)
-                    ArchipelagoPlugin.Instance.SendDeathLink();
-            }
-            catch (Exception ex)
-            {
-                ArchipelagoPlugin.LogError(ex, "PlayerStatus.Kill Postfix");
-            }
-        }
+        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
+    }
+
+    [HarmonyPatch(typeof(PlayerStatus), "Die")]
+    public class PlayerStatus_Die_Patch
+    {
+        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
+    }
+
+    [HarmonyPatch(typeof(PlayerMovement), "Kill")]
+    public class PlayerMovement_Kill_Patch
+    {
+        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
+    }
+
+    [HarmonyPatch(typeof(PlayerMovement), "Die")]
+    public class PlayerMovement_Die_Patch
+    {
+        static void Postfix() { ArchipelagoPlugin.Instance?.SendDeathLink(); }
     }
 
     // ─── Level completion hook ────────────────────────────────────────────────
